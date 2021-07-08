@@ -42,13 +42,33 @@ v_algorithms = c("fast.iamb", "mmpc", "si.hiton.pc", "pc.stable", "iamb.fdr", "h
 
 list_bnlearn = list()
 
-for(j in v_algorithms) for(k in names(list_df))try({
-  list_bnlearn [[j]][[k]] = do.call(
+# for(j in v_algorithms) for(k in names(list_df))try({
+#   list_bnlearn [[j]][[k]] = do.call(
+#     what = j,
+#     args = list(x = list_df[[k]])
+#   )
+# })
+for(j in v_algorithms) for(k in names(list_df)) try({
+  list_bnlearn[[j]][[k]] <- do.call(
     what = j,
     args = list(x = list_df[[k]])
   )
-})
-
+  M_arcs <- arcs(list_bnlearn[[j]][[k]])
+  for(l in 1:nrow(M_arcs)){
+    list_bnlearn[[j]][[k]] <- set.arc(
+      x = list_bnlearn[[j]][[k]],
+      from = M_arcs[l,1],
+      to = M_arcs[l,2],
+      check.cycles = FALSE,
+      check.illegal = FALSE
+    )
+    list_bnlearn[[j]][[k]] <- choose.direction(
+      x = list_bnlearn[[j]][[k]],
+      arc = M_arcs[l,],
+      data = list_df[[k]]
+    )
+  }
+},silent = TRUE)
 # df_arcs = arcs(list_bnlearn[[j]][[k]])
 # for(l in 1:row(df_arcs)){
 #   list_bnlearn[[j]][[k]] = set.arc(
@@ -75,7 +95,9 @@ for(j in rownames(M_score)) M_score <- M_score[,order(M_score[j,])]
 for(j in colnames(M_score)) M_score <- M_score[order(M_score[,j]),]
 M_score
 #figure out scoring tommorrow
-
+graphviz.plot(
+  list_bnlearn[[nrow(M_score)]][[ncol(M_score)]]
+)
 # dag = mmpc(wbc_df_sub, undirected = FALSE, debug = TRUE)
 # plot(dag)
 # 
