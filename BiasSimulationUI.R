@@ -54,55 +54,62 @@ ui <- fluidPage(
     mainPanel("main panel",
               # Copy the line below to make a text input box
               textInput("dag_text", label = h3("Text input"), value = "~a|b + c|b"),
-              p("Nodes in the DAG"),
-              selectInput("inSelect", "Select input",
-                          c("Item A")),
               p("details of node"),
-              div(id="placeholder"),
-              verbatimTextOutput("out"),
               hr(),
-              grVizOutput("value"))
+              grVizOutput("value"), 
+              div(id="placeholder"),
+              verbatimTextOutput("out"))
   
   )
 )
 
 # Define server logic ----
 server <- function(input, output, session) {
+
   handler = reactiveVal(list())
   
   output$value = renderGrViz({ dag_ui(paste(input$dag_text)) })
-  observe({
-    x <- get_nodes(input$dag_text)
-    
-    # Can use character(0) to remove all choices
-    if (is.null(x))
-      x <- character(0)
-    
-    # Can also set the label and select items
-    updateSelectInput(session, "inSelect",
-                      label = paste("Select node to define"),
-                      choices = x,
-                      selected = tail(x, 1)
-    )
+  
+  observeEvent(input$dag_text, {
+    removeUI(
+      selector = "div:has(>> #select)")
   })
-  observeEvent(input$inSelect, {
-    new_id <- paste("node", input$inSelect, sep = "_")
-    insertUI(
-      selector = "#placeholder",
-      where = "beforeBegin",
-      ui = node_ui(new_id)
+  
+  observeEvent(input$dag_text, {
+    
+
+    x <- get_nodes(input$dag_text)
+    ui_num = length(x)
+    new_id = unlist(lapply(c(1:ui_num), function(y) paste("node", x[y], sep = "_")))
+    
+    
+    
+    
+    new_uis = lapply(c(1:ui_num), function(y) 
+      insertUI(
+        selector = "#placeholder",
+        where = "beforeBegin",
+        ui = node_ui(new_id[y])
+      )
     )
+    
+    
     handler_list <- isolate(handler())
-    new_handler <- callModule(node_server, new_id)
-    handler_list <- c(handler_list, new_handler)
-    names(handler_list)[length(handler_list)] <- new_id
+    
+    
+    new_handler = lapply(1:ui_num, function(y) 
+      callModule(node_server, new_id[y])
+    )
+    handler_list <-unlist(new_handler)
+    names(handler_list) <- new_id
     handler(handler_list)
+    
   })
   output$out <- renderPrint({
     lapply(handler(), function(handle) {
       handle()
     })
-  })  
+  })
 }
 
 # Run the app ----
