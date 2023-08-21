@@ -1,0 +1,58 @@
+##an interfacing script between the shiny app and the code
+
+library(HydeNet)
+
+dag_ui = function(dag_string){
+  dag = HydeNetwork(eval(str2lang(dag_string)))
+
+  return(plot(dag))
+}
+
+get_nodes = function(dag_string){
+  if(class(tryCatch(HydeNetwork(eval(str2lang(dag_string))), error =  function(x) x=1)) =="HydeNetwork"){
+    dag = HydeNetwork(eval(str2lang(dag_string)))
+    node_test = dag[["nodes"]]
+    return(node_test)
+  }
+
+}
+
+
+get_arrows = function(dag_string){
+  if(class(tryCatch(HydeNetwork(eval(str2lang(dag_string))), error =  function(x) x=1)) =="HydeNetwork"){
+    dag = HydeNetwork(eval(str2lang(dag_string)))
+    parents = unlist(dag[["parents"]])
+    children = names(parents)
+    children = gsub('[[:digit:]]+', '', children)
+    arrow_list = unlist(lapply(1:length(children), function(x) paste0(parents[x], " -> ", children[x])))
+    return(arrow_list)
+  }
+}
+
+handler_df = function(x){
+  test_df = data.frame(unlist(lapply(x(), function(handle) {
+    handle()[["distribution"]]
+  })), holder = 1)
+  return(rownames(test_df[test_df[,1]=="binary",]))
+}
+
+get_dist = function(x, y){
+  output = as.character(lapply(y(), function(handle) {
+    handle()[["distribution"]]})[["exposure"]])
+
+  # output = gsub("binary", "dbern(", output )
+  # output = gsub("continuous", "dnorm(", output )
+  output
+
+
+
+}
+
+get_sum_stats = function(x){
+  as.character(lapply(handler(), function(handle) {
+    handle()[["distribution"]]})[["exposure"]])
+  as.double(lapply(handler(), function(handle) {
+    handle()[[2]]})[["exposure"]])
+}
+
+
