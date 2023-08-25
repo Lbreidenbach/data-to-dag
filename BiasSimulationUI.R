@@ -53,7 +53,7 @@ node_server <- function(input, output, session) {
   output$ui_placeholder <- renderUI({
     type <- req(input$node_dist)
     if(type == "binary") {
-      numericInput(ns("prev"), paste0(node_name,"'s prevalence (between 0-1):"), 0.5)
+      numericInput(ns("prev"), paste0(node_name,"'s prevalence (between 0-1):"), 0.5, min = 0, max = 1, step = 0.05)
 
     } else if (type == "continuous") {
       tagList(numericInput(ns("mean"), paste0("Mean of ", node_name,":"),0),
@@ -72,38 +72,69 @@ node_server <- function(input, output, session) {
 
 ui <- fluidPage(
   titlePanel(h1("Bias Simulator", align ="center")),
-  fluidRow(column(12, mainPanel(p("format"),
-                                textInput("dag_text", label = h3("Input DAG formula"),
-                                          value = "~exposure|confounder + outcome|confounder*exposure + collider|exposure*outcome",
-                                          width = "100%"),
-                                verbatimTextOutput("bn_info"),
-                                width = 12)
-                  )
-           ),
-  sidebarLayout(position = "right",
+  tabsetPanel(
+    tabPanel("Set Bayesian Network", fluid = TRUE,
+             fluidRow(column(12, mainPanel(HTML("<b>Input the directed acyclic graph formula in the text box below and follow this format:</b><br>
+                                  1. Start formula with '~'<br>
+                                  2. Write which variables cause others like this: 'effect|cause1*cause2*cause_n' or like this 'effect|cause1 + effect|cause2 + effect|cause_n'. <br>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8226; if a causes b causes c, write 'b|a + c|b' or 'c|b + b|a'<br>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8226; if a causes b, and c has no effect on either, write 'b|a + c'<br>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8226; there must be at least one variable that affects another<br>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8226; nodes can't have names with spaces<br>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8226; formula can't be cyclical. cyclical formaulas include 'b|a + a|b' or 'c|b + b|a + a|c'<br>
+                                  3. Once the formula is entered, fill out the additional node info on the side"),
+                                           textInput("dag_text", label = h4("DAG formula box"),
+                                                     value = "~exposure|confounder + outcome|confounder*exposure + collider|exposure*outcome",
+                                                     width = "100%"),
 
-                fluidRow(column(6, sidebarPanel(h4("---Set Distributions---", align = "center"),
-                                                uiOutput("node_box"),
-                                                div(id="placeholder"),
-                                                h4("---Set Beta Values---", align = "center"),
-                                                uiOutput("beta_box"),
-                                                h4("---Set Analysis---", align = "center"),
-                                                uiOutput("exp_out"),
-                                                uiOutput("conf_sel"),
-                                                width = 12
-                )),
-                ),
-                column(6, align = "center", mainPanel(h4("Dag plot"),
-                                    grVizOutput("value"),
+                                           width = 12)
+             )
+             ),
+             sidebarLayout(position = "right",
+
+                           fluidRow(column(6, sidebarPanel(h4("---Set Distributions---", align = "center"),
+                                                           uiOutput("node_box"),
+                                                           div(id="placeholder"),
+                                                           h4("---Set Beta Values---", align = "center"),
+                                                           uiOutput("beta_box"),
+
+                                                           width = 12
+                           )),
+                           ),
+                           column(6, align = "center", mainPanel(h4("Dag plot"),
+                                                                 grVizOutput("value"),
 
 
-                                    width = 12
-                )),
+                                                                 width = 12
+                           )),
 
 
 
+             ),
+             fluidRow(column(12, mainPanel(h3("Code for your specified Bayesian Network", align ="center"),
+                                           p("If the Hydenet library is in use, this code can be copy/pasted from this box to get a working dag object"),
+                                           verbatimTextOutput("bn_info"),
+                                           width = 12)
+             )
+             )
+             ),
+    tabPanel("Set anaylsis", fluid = TRUE,
+             sidebarLayout(
+               sidebarPanel(h4("---Set Analysis---", align = "center"),
+                            uiOutput("exp"),
+                            uiOutput("out"),
+                            uiOutput("sel"),
+                            uiOutput("sel_op"),
+                            uiOutput("conf"),
+                            uiOutput("conf_op"),
+                            numericInput("n_data", "Number of samples per dataset", 1, min = 1, step = 1),
+                            numericInput("iteration", "Number of datasets created and analyzed", 1, min = 1, step = 1)
+                            ),
+               mainPanel()
+             )
+    )
   ),
-  fluidRow(column(12, mainPanel(verbatimTextOutput("out"))))
+
 
 )
 
@@ -145,36 +176,95 @@ server <- function(input, output, session) {
     handler(handler_list)
 
 
-    #maybe set exposure first and render different ui for outcome so exp and out cant be set to same node
-    output$exp_out = renderUI(
+    output$exp = renderUI(
 
 
-      fluidRow(column(6,
+      fluidRow(column(12,
                       selectInput("exp", "Exposure", choices = x)
-                      ),
-               column(6,
-                      selectInput("out", "Outcome", choices = x)
                       )
                )
 
     )
+    output$out = renderUI(
 
-    output$conf_sel = renderUI(
 
-      fluidRow(column(6,
-                      checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out])
-      ),
-      column(6,
-             selectInput("sel", "Selection Node", choices = handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])
+      fluidRow(column(12,
+                      selectInput("out", "Outcome", choices = x[!x==input$exp])
+                      )
+      )
+
+    )
+
+
+
+    output$sel = renderUI(
+      if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
+        fluidRow(column(12,
+                        selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c( "No"), selected = "No")
+        )
+        )
+
+      }else{
+        fluidRow(column(12,
+                        selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c("Yes", "No"), selected = "No")
+        )
+        )
+
+      }
+
+      # if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
+      #   input$selection = "No"
+      # }
+
+    )
+
+
+    output$sel_op = renderUI(
+      if(input$selection == "Yes"){
+
+          fluidRow(column(12,
+                          radioButtons("sel", "Selection Node", choices = handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])
+          )
+          )
+
+      }else{
+
+      }
+
+
+
+    )
+
+    output$conf = renderUI(
+      fluidRow(column(12,
+                      selectInput("adjust", "Adjust for confounders?", choices = c("Yes", "No"), selected = "No")
       )
       )
 
     )
 
+    output$conf_op = renderUI(
+      if(input$adjust == "Yes"){
+        if(input$selection == "Yes"){
+          fluidRow(column(12,
+                          checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out & !x==input$sel])
+          )
+          )
+        }else{
+          fluidRow(column(12,
+                          checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out])
+          )
+          )
+
+        }
+
+      }else{
+
+      }
+
+    )
+
     output$bn_info = renderPrint({
-
-      ###CURRENT BUG, TEST DF FAILS WHEN ALL NODES CONTINUOUS
-
 
       test_df = data.frame(unlist(lapply(handler(), function(handle) {
         handle()[["distribution"]]
@@ -268,7 +358,7 @@ server <- function(input, output, session) {
       }
 
       if(nrow(bi_nodes_df)>0){
-        bi_code = unlist(lapply(c(1:length(rownames(bi_nodes_df))), function(i){paste0('\ndag = setNode(dag, ',
+        bi_code = unlist(lapply(c(1:length(rownames(bi_nodes_df))), function(i){paste0('\n    dag = setNode(dag, ',
                                                                                        rownames(bi_nodes_df)[[i]],
                                                                                        ', nodeType = "dbern", prob = paste0("ilogit(",',
                                                                                        paste(get_lgm(which(rownames(test_df) == rownames(bi_nodes_df)[[i]])), get_linker(i), collapse = " "),',")"))')}))
@@ -278,7 +368,7 @@ server <- function(input, output, session) {
 
       if(nrow(cont_nodes_df)>0){
         cont_code = unlist(lapply(c(1:length(rownames(cont_nodes_df))), function(i)
-        {paste0('\ndag = setNode(dag, ',
+        {paste0('\n    dag = setNode(dag, ',
                 rownames(cont_nodes_df)[[i]], ', nodeType = "dnorm", mu = paste0(',
                 get_lgm(which(rownames(test_df) == rownames(cont_nodes_df)[[i]])),
                 cont_nodes_df[i,4],
@@ -290,67 +380,56 @@ server <- function(input, output, session) {
         cont_code = NULL
       }
 
+      set_ate = as.numeric(beta_df[beta_df$parent == input$exp & beta_df$child == input$out, "beta_vals"])
+      if(length(set_ate)==0){
+        set_ate=0
+      }
+
+      #Current Bug: if there's no valid selection node and the user has it set to Yes, then sb is ""
+      if(input$selection == "Yes"){
+        sb = paste0('"', input$sel, '"')
+      }else{
+        sb = format(NULL)
+      }
+
+
+
+      if(input$adjust == "Yes"){
+        if(length(input$conf)==1){
+          confounder = paste0('"', input$conf, '"')
+
+        }else{
+          confounder = list(format(input$conf))
+        }
+
+      }else{
+        confounder = format(NULL)
+      }
+
+      cat(c(paste0("\ndag_1 = function(", set_ate,
+                   ", exp_p, out_p){\n    holder1 = ate \n    holder2 = exp_p \n    holder3 = out_p \n    dag = HydeNetwork("
+                   ,input$dag_text,")"),
+            bi_code,
+            cont_code,
+            "\n}",
+            paste0('\nvariedruns(', input$iteration ,
+                   ', dag1, exposure = "', input$exp,
+                   '" , outcome = "', input$out ,
+                   '" , covariates = ', confounder,
+                   ' , sb = ', sb,
+                   ' , ate = ', set_ate,
+                   ', n = ', input$n_data,
+                   ')')))
 
 
 
 
-      cat(c(bi_code, cont_code))
 
 
-
-
-
-
-
-      ###Bugged lines
-
-
-
-      # lapply(c(1:length(test_df[[1]])), function(i) paste(get_lgm(i), get_linker(i), collapse = " "))
-
-
-      # lapply(c(1:length(parent_list[[4]][[1]])), function(y){
-      #   as.numeric(parent_list[[4]][y,2]) *
-      #     get_type(y,4)
-      # })
-
-
-
-
-      # paste0("illogit(",
-      #        parent_list[[1]][1,2],
-      #        " * ",
-      #        parent_list[[1]][1,1],
-      #        " + ",
-      # set_p(as.numeric(test_df[names(parent_list[1]),3]),
-      #       as.numeric(parent_list[[1]][1,2]) *
-      #         get_type(1)), ")")
-
-
-
-
-
-      #c(bi_code, cont_code)
-
-
-      #strsplit(beta_id, " -> ")[[1]][1]
-
-
-      # test_df[5] = data.frame(unlist(lapply(handler(), function(handle) {
-      #   handle()[["sumstat"]][[3]]
-      # })), holder = 1)
-
-      # test_df$mean = data.frame(unlist(lapply(handler(), function(handle) {
-      #   handle()[["sumstat"]][2]
-      # })), holder = 1)
-
-
-      #rownames(test_df[test_df[,1]=="binary",])
-
-      #lapply(x, function(y) {paste0("dag = setNode(dag, ", y, ", nodeType = ",get_dist(y, handler),")")})
-
-      # as.character(lapply(handler(), function(handle) {
-      #   handle()[["distribution"]]})[["exposure"]])
+      # cat(c(paste0("\ndag = HydeNetwork(",input$dag_text,")\n"),
+      #       bi_code,
+      #       cont_code
+      #       ))
 
       # test_dag = function(ate, exp_p, out_p){
       #   oop = out_p
