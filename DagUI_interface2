@@ -1,0 +1,579 @@
+library(HydeNet)
+library(rjags)
+library(MatchIt)
+library(ggplot2)
+library(plyr)
+#library(EmpiricalBrownsMethod)
+library(dplyr)
+library(gtable)
+library(grid)
+library(GGally)
+library(ggridges)
+library("reshape2")
+library(gridExtra)
+#####first attempt at displaying language output
+
+#Script functions
+######
+
+
+check.integer = function(x){
+  check = all.equal(x, as.integer(x))
+  return(isTRUE(check))
+}
+create_data = function(jag_dag, n, reclassify = as.integer){
+  sim_df = bindSim(HydeSim(jag_dag, variable.names = colnames(jag_dag$dag), n.iter = n, bind = FALSE))
+  relabel = lapply(sim_df, check.integer) # JAGS labels integers as numeric, have to reclassify them
+  relabel = relabel[relabel != FALSE]
+  relabel = names(relabel)
+  sim_df[relabel] = lapply(sim_df[relabel], reclassify)
+  sim_df = sim_df[c(-length(sim_df), -(length(sim_df)-1))]
+  return(sim_df)
+}
+set_p = function(p,model){
+  p2 = log(p/(1-p))
+  b0 = p2-model
+  return(b0)
+}
+misdiagnosis = function(df, variable, under_rate=0, over_rate=0){
+  index_1 = which(df[variable] == 1)
+  index_0 = which(df[variable] == 0)
+
+  over = round(length(index_0)*over_rate)
+  under = round(length(index_1)*under_rate)
+
+  if(under != 0){
+    df[index_1, variable][1:under] = 0
+  }
+  if(over != 0){
+    df[index_0, variable][1:over] = 1
+  }
+
+  return(df)
+}
+tot_bind <- function(datalist) {
+  require(plyr)
+  temp = rbind.fill(datalist)
+  rownames(temp) <- unlist(lapply(datalist, row.names))
+  return(temp)
+}
+
+bi_strat = function(x, df, column){
+  index_1 = which(df[column] == x)
+  index_0 = which(df[column] != x)
+  df[index_0, column] = 0
+  df[index_1, column] = 1
+  return(list(df[index_1,], df[index_0,]))
+}
+find_nulls = function(run){
+  pval_df = as.data.frame(run[[2]])
+  beta_df= as.data.frame(run[[1]])
+  null_index = sapply(pval_df, function(x) which(x >0.05))
+  null_betas = lapply(c(1:ncol(run[[1]])), function(x) beta_df[null_index[[x]], x])
+  n = unlist(lapply(null_betas, length))
+  max_b = unlist(lapply(null_betas, max))
+  min_b = unlist(lapply(null_betas, min))
+  df = data.frame(colnames(run[[1]]), n/nrow(run[[2]]), max_b, min_b)
+  colnames(df) = c("method", "null_percent", "max_null beta", "min_null_beta")
+  return(df)
+}
+dichotomize = function(column, df, div){
+  x = as.numeric(quantile(df[,column])[div])
+  index_0 = which(df[column] < x)
+  index_1 = which(df[column] >= x)
+  df[index_0, column] = 0
+  df[index_1, column] = 1
+  df[,column] = as.integer(df[,column])
+  df = rbind(df[index_1,], df[index_0,])
+  rownames(df) = NULL
+  return(df)
+}
+col_dichotomize = function(column, div =4){
+  x = as.numeric(quantile(column)[div])
+  index_0 = which(column < x)
+  index_1 = which(column >= x)
+  column[index_0] = 0
+  column[index_1] = 1
+  column = as.integer(column)
+  return(column)
+}
+
+base_strat = function(exposure, outcome, covariate, df, div = 3){
+  if(class(df[,exposure]) == "numeric"){
+    strats = dichotomize(exposure, df, div)
+    new_df = rbind(strats[[1]], strats[[2]])
+    out_df = odds_ratio(exposure, outcome, covariate, df = new_df)
+  } else{
+    out_df = odds_ratio(exposure, outcome, covariate, df = df)
+  }
+  # if(class(df$outcome) == "integer"){
+  #   out_df = odds_ratio(exposure, outcome, covariate, df = df)
+  # } else if(class(df$outcome) == "numeric"){
+  #   strats_2 = bi_strat(div, df, exposure)
+  #   treat = as.data.frame(strats_2[1])
+  #   untreat = as.data.frame(strats_2[2])
+  #   temp_test = t.test(treat[[paste(exposure)]], untreat[[paste(exposure)]])
+  #   out_df = data.frame(odds_ratio = NA,
+  #                       beta = abs(temp_test$estimate[1] - temp_test$estimate[2]),
+  #                       lower_int = temp_test$conf.int[1],
+  #                       upper_int = temp_test$conf.int[2],
+  #                       confint_diff = abs(temp_test$conf.int[2]-temp_test$conf.int[1]),
+  #                       p_val = temp_test$p.value)
+  # } else {
+  #   print("outcome must be integer or numeric")
+  # }
+  return(out_df)
+}
+matchit_matching = function(exposure, covariates, df, d = "logit", ratio = 1){
+  psm = matchit(as.formula(paste(exposure, paste(covariates, collapse=" + "), sep=" ~ ")), data = df, method = "nearest", distance = d, ratio = ratio)
+  treated_index = rownames(psm$match.matrix)
+  untreated_index = c(psm$match.matrix[1:length(psm$match.matrix)])
+  treated_subset = df[treated_index, ]
+  untreated_subset = df[untreated_index, ]
+  return(rbind(treated_subset, untreated_subset))
+}
+get_ps = function(exposure, covariates, df){
+  if(class(df[,exposure]) == "numeric" ){
+    ps_mod = lm(as.formula(paste(exposure, paste(covariates, collapse=" + "), sep=" ~ ")), data = df)
+    ps = as.numeric(plogis(fitted.values(ps_mod)))
+    num_mod = lm(as.formula(paste(exposure, 1, sep=" ~ ")), data = df)
+    num = as.numeric(plogis(fitted.values(num_mod)))
+  }else if(class(df[,exposure]) == "integer"){
+    ps_mod <- glm(as.formula(paste(exposure, paste(covariates, collapse=" + "), sep=" ~ ")), data = df, family="binomial")
+    ps = fitted(ps_mod)
+    num_mod = glm(as.formula(paste(exposure, 1, sep=" ~ ")), data = df, family = "binomial")
+    num = fitted(num_mod)
+  }else{
+    print("exposure must be numeric or integer class")
+  }
+
+  df_out = data.frame(ps = ps,
+                      weights = num/ps)
+  df$ps = df_out$ps
+  df$weights = df_out$weights
+  return(df)
+}
+odds_ratio = function(exposure, outcome, covariates=NULL, df){
+  vars = c(exposure, covariates)
+  cont_glm = glm(as.formula(paste(outcome, paste(vars, collapse=" + "), sep=" ~ ")), data = df, family = "binomial")
+  exp_coef = as.numeric(cont_glm$coefficients[2])
+  exp_or = exp(exp_coef)
+  or_confint = confint.default(cont_glm, trace = F)
+  or_upper = or_confint[2,2]
+  or_lower = or_confint[2,1]
+  int_diff = or_upper - or_lower
+
+  or_df = data.frame("odds_ratio" = exp_or,
+                     beta = exp_coef,
+                     lower_int = or_lower,
+                     upper_int = or_upper,
+                     confint_diff = abs(int_diff),
+                     p_val = coef(summary(cont_glm))[2,4],
+                     n = nrow(df))
+  row.names(or_df) = "logistic_or"
+  return(or_df)
+}
+beta_chi_sq = function(exposure, outcome, df){
+  if ((class(df[,exposure]) == "integer") & (class(df[,outcome]) == "integer")){
+    r_tab = table(df[,exposure], df[,outcome])
+    a = r_tab[2,2]
+    b = r_tab[2,1]
+    c = r_tab[1,2]
+    d = r_tab[1,1]
+    or_2 = (a/c)/(b/d)
+    beta = log(or_2)
+    or_upper_2 = log(or_2) + 1.96 * sqrt(1/a + 1/b + 1/c + 1/d)
+    or_lower_2 = log(or_2) - 1.96 * sqrt(1/a + 1/b + 1/c + 1/d) #confint for coef
+    int_diff = or_upper_2-or_lower_2
+    # se = int_diff/(2*1.96)
+    # z = abs(beta/se)
+    # p = exp(-0.717*z - 0.416*z^2)
+    chi_test = chisq.test(r_tab)
+    or_df_2 = data.frame("odds_ratio" = or_2,
+                         beta = beta,
+                         lower_int = or_lower_2,
+                         upper_int = or_upper_2,
+                         confint_diff = abs(int_diff),
+                         p_val = chi_test$p.value,
+                         n = nrow(df))
+    rownames(or_df_2) = "chi_sq"
+    return(or_df_2)
+  }else{
+    warning("chi squared only accepts integer values")
+  }
+}
+beta_t_test = function(exposure, outcome, df){
+  if((class(df[,outcome]) == "numeric")&(class(df[,exposure]) == "integer")){
+    strat = bi_strat(1, df, exposure)
+    temp_test = t.test(strat[[1]][,outcome], strat[[2]][,outcome])
+    t_test_df = data.frame("odds_ratio" = NA,
+                           beta = abs(temp_test$estimate[1] - temp_test$estimate[2]),
+                           lower_int = temp_test$conf.int[1],
+                           upper_int = temp_test$conf.int[2],
+                           confint_diff = abs(temp_test$conf.int[2]-temp_test$conf.int[1]),
+                           p_val = temp_test$p.value,
+                           n = nrow(df))
+    rownames(t_test_df)="t_test"
+    return(t_test_df)
+  }else{
+    warning("outcome must be continuous")
+  }
+
+}
+lm_beta = function(exposure, outcome, covariates=NULL, df){
+  vars = c(exposure, covariates)
+  lm1 = lm(as.formula(paste(outcome, paste(vars, collapse=" + "), sep=" ~ ")), data = df)
+  confint = confint(lm1, trace = F)
+  upper_int = confint[2,2]
+  lower_int = confint[2,1]
+  beta = as.numeric(lm1$coefficients[2])
+  regression_df = data.frame("odds_ratio" = NA,
+                             beta = beta,
+                             lower_int =lower_int,
+                             upper_int = upper_int,
+                             confint_diff = abs(upper_int-lower_int),
+                             p_val = coef(summary(lm1))[2,4],
+                             n = nrow(df))
+  rownames(regression_df) = "linear_regression"
+  return(regression_df)
+}
+
+ps_strat = function(exposure, outcome, covariates, df, x=5, return_strata=F){
+  temp_df = get_ps(exposure, covariates, df)
+  if(apply(temp_df[covariates], 2, is.integer)==TRUE){
+    quintiles = as.double(names(table(temp_df$ps)))-0.000000001
+    temp_df$strat_cat = as.integer(cut(temp_df$ps, breaks = c(quintiles,1), labels = 1:length(quintiles-1), include.lowest = TRUE))
+  }else{
+    quintiles = unique(quantile(temp_df$ps, prob=seq(0,1,1/(x))))-0.0000001
+    #temp_df$strat_cat = as.integer(cut(temp_df$ps, breaks = c(0, quintiles), labels = 1:(length(quintiles)), include.lowest = FALSE))
+    temp_df$strat_cat = as.integer(cut(temp_df$ps, breaks = c(-Inf, quintiles[-1]), labels = 1:(length(quintiles)-1), include.lowest = FALSE))
+  }
+
+  method = function(m){
+    strat_df = aaply(1:length(quintiles), 1, function(y) m(exposure, outcome, df = temp_df[temp_df$strat_cat == y, ]))
+    strat_df = as.data.frame(strat_df)
+    strat_df = as.data.frame(apply(strat_df, 2, unlist))
+    rownames(strat_df) = paste0("strata_", as.character(1:length(quintiles)))
+    pop = as.numeric(aaply(1:length(quintiles), 1, function(y) nrow(temp_df[temp_df$strat_cat == y, ])))
+    strat_df$pop = pop
+    strat_df = as.data.frame(strat_df)
+    strat_df$weights = strat_df$pop/ sum(strat_df$pop)
+    beta_df = strat_df
+    beta_df = lapply(beta_df, as.numeric)
+    beta_df = lapply(beta_df[1:6], function(y) y*(beta_df$pop/sum(beta_df$pop)))
+    beta_df = as.data.frame(beta_df)
+    beta_df = lapply(beta_df, sum)
+    beta_df = as.data.frame(beta_df)
+    rownames(beta_df) = "averaged_strata"
+    # if(return_strata==T){
+    #   tot_df = rbind(strat_df, beta_df)
+    # }else{
+    #   tot_df = beta_df
+    # }
+
+    return(list(strat_df, beta_df))
+  }
+  strat_means = aaply(1:length(quintiles), 1, function(y) colMeans(temp_df[temp_df$strat_cat == y, ]))
+  strat_means = as.data.frame(strat_means)
+  #strat_means = strat_means[,c(exposure, outcome, covariates)]
+  output = method(odds_ratio)
+  output[[1]]$strata = 1:length(quintiles)
+  applied_df = output[[2]]
+
+  #temp_sub = temp_df[temp_df$strat_cat == x, ]
+  #wrong, shoud be for outcome
+
+
+  return(applied_df)
+}
+ps_weight = function(exposure, outcome, covariates, df, weights){
+  vars = c(exposure, covariates)
+  if(class(df[,outcome]) == "numeric" ){
+    cont_glm = lm(as.formula(paste(outcome, paste(vars, collapse=" + "), sep=" ~ ")), data = df, weights = weights)
+  }else if(class(df[,outcome]) == "integer"){
+    cont_glm = glm(as.formula(paste(outcome, paste(vars, collapse=" + "), sep=" ~ ")), data = df, weights = weights, family = "quasibinomial")
+  }else{
+    warning("exposure must be numeric or integer")
+  }
+
+  exp_coef = as.numeric(cont_glm$coefficients[2])
+  exp_or = exp(exp_coef)
+  or_confint = confint.default(cont_glm, trace = F)
+  or_upper = or_confint[2,2]
+  or_lower = or_confint[2,1]
+  int_diff = or_upper - or_lower
+
+  or_df = data.frame("odds_ratio" = exp_or,
+                     beta = exp_coef,
+                     lower_int = or_lower,
+                     upper_int = or_upper,
+                     confint_diff = abs(int_diff),
+                     p_val = coef(summary(cont_glm))[2,4],
+                     n = nrow(df))
+  row.names(or_df) = "ps_weighting"
+  return(or_df)
+}
+
+ipw = function(exposure, outcome, covariates=NULL, sb, inv_covariates, df){
+  inv_df = lapply(c(1:length(inv_covariates)), function(x) get_ps(sb, inv_covariates[[x]], df))
+  ##make a logestic regression instead
+  inv_cov_df = lapply(c(1:length(inv_covariates)), function(x) ps_weight(exposure, outcome, covariates, inv_df[[x]], weights = weights))
+  # tot_df = rbind.fill(inv_cov_df)
+
+  #inv_sum = lapply(c(1:length(inv_covariates)), function(x) ps_weight(exposure, outcome, covariates, inv_cov_df[[x]], "weights"))
+  tot_df = rbind.fill(inv_cov_df)
+  inv_row = lapply(c(1:length(inv_covariates)), function(x) paste("ipw:", sb, "~", paste(inv_covariates[[x]],collapse = " + ")))
+  rownames(tot_df) = unlist(inv_row)
+  return(tot_df)
+}
+
+apply_methods = function(exposure, outcome, covariates=NULL, sb=NULL, inv_covariates=NULL, df, x=5, div=4, ratio=1, matching=F){
+
+  #create empty data frame
+  tot_df = data.frame("odds_ratio" = as.numeric(),
+                      beta = as.numeric(),
+                      lower_int = as.numeric(),
+                      upper_int = as.numeric(),
+                      confint_diff = as.numeric(),
+                      p_val = as.numeric(),
+                      n = as.numeric())
+
+  #do any IPW here
+  #
+  #
+  #
+
+  ##Data parsing, maybe update to apply for mter than one Selection Bias source
+  if(is.null(sb)==F){
+    # if(is.null(inv_covariates)==T){
+    #   sb_df = bi_strat(1, df, sb)[[1]]
+    # } else {
+    #   tot_df = tot_bind(list(tot_df, ipw(exposure, outcome, covariates=NULL, sb, inv_covariates, df)))
+    #   #lapply(c(1:length(sb)), function(x) ps_weight(exposure, outcome, covariates, inv_df[[x]], "weights"))
+    #   sb_df = bi_strat(1, df, sb)[[1]]
+    #   df = sb_df
+    # }
+    sb_df = bi_strat(1, df, sb)[[1]]
+    df = sb_df
+  }
+
+
+  if(is.null(covariates)==T){
+    tot_df = tot_bind(list(tot_df, odds_ratio(exposure, outcome, df = df)))
+    return(tot_df)
+
+  }
+  re = function(df, name){
+    rownames(df) = name
+    return(df)
+  }
+  ps_df = get_ps(exposure, covariates, df)
+  #dichotomizes exposure if needed
+  if(class(df[,exposure]) == "numeric" ){
+    di_df = dichotomize(exposure, df, div)
+  } else {
+    di_df = df
+  }
+
+  if(matching == F){
+    tot_df = tot_bind(list(tot_df, odds_ratio(exposure, outcome, covariates, df = df),
+                           #ps_strat(exposure, outcome, covariates, df, x=5),
+                           ps_weight(exposure, outcome, covariates, ps_df, "weights")
+    ))
+    return(tot_df)
+
+  }
+
+
+  #matching methods
+  psm_match_df = matchit_matching(exposure, covariates, di_df, d = "logit", ratio)
+  mdm_match_df = matchit_matching(exposure, covariates, di_df, d = "mahalanobis", ratio)
+
+
+  #all-accepting methods
+  tot_df =  tot_bind(list(tot_df,
+                          #ps_strat(exposure, outcome, covariates, df, x=5),
+                          ps_weight(exposure, outcome, covariates, ps_df, "weights")))
+  #tot_df =  tot_bind(list(tot_df, ps_weight(exposure, outcome, covariates, ps_df, "weights")))
+  #
+  #combining data parses w/ read outs
+
+  if(class(df[,outcome])=="numeric"){
+    tot_df = tot_bind(list(tot_df,
+                           lm_beta(exposure, outcome, covariates, df),
+                           re(lm_beta(exposure, outcome, df= psm_match_df), "ps_matching_regression"),
+                           re(lm_beta(exposure, outcome, df =mdm_match_df), "mdm_matching_regression")
+    ))
+  }else if(class(df[,outcome])=="integer"){
+    tot_df = tot_bind(list(tot_df,
+                           odds_ratio(exposure, outcome, covariates, df),
+                           re(odds_ratio(exposure, outcome, df = psm_match_df), "ps_matching_regression"),
+                           re(odds_ratio(exposure, outcome, df = mdm_match_df), "mdm_matching_regression")
+    ))
+  }
+  tot_df = as.data.frame(apply(tot_df, 2, unlist))
+  return(tot_df)
+}
+
+make_model = function(dag, ate, exp_p, out_p){
+  dag_1 = dag(ate, exp_p, out_p)
+  writeNetworkModel(dag_1, pretty = TRUE)
+  comp_dag = compileJagsModel(dag_1)
+  return(comp_dag)
+}
+
+varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, inv_covariates = NULL, ate=NULL, n=NULL, exp_p=NULL, out_p=NULL, under_r = 0, over_r = 0, x=5, div = 4, ratio=1, matching=F){
+  randomize = function(variable, rmodel){
+    if(is.null(variable) == TRUE){
+      variable = rmodel
+    } else {
+      variable = rep(variable, runs)
+    }
+  }
+
+  ate = randomize(ate, runif(runs, -1, 1))
+  n = randomize(n, as.integer(runif(runs, 10000, 100000)))
+  exp_p = randomize(exp_p, runif(runs, 0.02, 0.3))
+  out_p = randomize(out_p, runif(runs, 0.01, 0.4))
+  under_r = randomize(under_r, runif(runs, 0, 1))
+  over_r = randomize(over_r, runif(runs, 0, 1))
+
+  value_df = data.frame(ate = ate,
+                        n = n,
+                        exp_p = exp_p,
+                        out_p = out_p,
+                        under_r = under_r,
+                        over_r = over_r)
+
+  temp_dag = lapply(c(1:runs), function(x) make_model(dag, value_df[x,1], value_df[x,3], value_df[x,4]))
+  temp_df = lapply(c(1:runs), function(x) create_data(temp_dag[[x]], as.numeric(value_df[x,2])))
+  temp_df = lapply(c(1:runs), function(x) misdiagnosis(temp_df[[x]], outcome, under_r[x], over_r[x]))
+  temp_output = lapply(temp_df, apply_methods, exposure = exposure, outcome = outcome, covariates = covariates, sb = sb, inv_covariates = inv_covariates, x=x, div=div, ratio=ratio, matching=matching)
+
+  if(class(temp_df[[1]][,outcome])=="integer"){
+    out_p = unlist(lapply(c(1:runs), function(x) sum(temp_df[[x]][,outcome])/nrow(temp_df[[x]])))
+
+  }else{
+    out_p=rep(NA, runs)
+
+  }
+  if(class(temp_df[[1]][,exposure])=="integer"){
+    exp_p = unlist(lapply(c(1:runs), function(x) sum(temp_df[[x]][,exposure])/nrow(temp_df[[x]])))
+    #mde = unlist(lapply(c(1:runs), function(x) sum(temp_df[[x]][,outcome])/nrow(temp_df[[x]])))
+    #unlist(lapply(colnames(x_val), function(x) 0.02*sqrt(1 / (run[[3]][,x]*(1 - run[[3]][,x])*run[[5]][,x] ) )))
+  }else{
+    exp_p=rep(NA, runs)
+    #mde=rep(NA, runs)
+  }
+  temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], exp_prev = rep(exp_p[x], nrow(temp_output[[x]]))))
+  temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], out_prev = rep(out_p[x], nrow(temp_output[[x]]))))
+  #temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], population = rep(n[x], nrow(temp_output[[x]]))))
+  temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], set_ate = rep(ate[x], nrow(temp_output[[x]]))))
+  temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], over_r = rep(over_r[x], nrow(temp_output[[x]]))))
+  temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], under_r = rep(under_r[x], nrow(temp_output[[x]]))))
+  partition = laply(temp_output, as.matrix)
+  if(is.null(covariates)==T & is.null(inv_covariates)==T){
+    partition = data.frame(calculated_ate = partition[, 2],
+                           lower_int = partition[, 3],
+                           upper_int = partition[, 4],
+                           p_values = partition[, 6],
+                           exp_prevalence = partition[, 8],
+                           out_prevalence = partition[, 9],
+                           sample_population = partition[, 7],
+                           set_ate = partition[, 10],
+                           over_r = partition[,11],
+                           under_r = partition[,12])
+    partition = as.matrix(partition)
+    return(partition)
+  }
+  run_list = list(calculated_ate = partition[,, 2],
+                  lower_int = partition[,, 3],
+                  upper_int = partition[,, 4],
+                  p_values = partition[,, 6],
+                  exp_prevalence = partition[,, 8],
+                  out_prevalence = partition[,, 9],
+                  sample_population = partition[,, 7],
+                  set_ate = partition[,, 10],
+                  over_r = partition[,,11],
+                  under_r = partition[,,12])
+
+  return(run_list)
+}
+
+
+#Ui Facing Functions
+#####
+
+dag_ui = function(dag_string){
+  dag = HydeNetwork(eval(str2lang(dag_string)))
+
+  return(plot(dag))
+}
+
+get_nodes = function(dag_string){
+  if(class(tryCatch(HydeNetwork(eval(str2lang(dag_string))), error =  function(x) x=1)) =="HydeNetwork"){
+    dag = HydeNetwork(eval(str2lang(dag_string)))
+    node_test = dag[["nodes"]]
+    return(node_test)
+  }
+
+}
+
+
+get_arrows = function(dag_string){
+  if(class(tryCatch(HydeNetwork(eval(str2lang(dag_string))), error =  function(x) x=1)) =="HydeNetwork"){
+    dag = HydeNetwork(eval(str2lang(dag_string)))
+    parents = unlist(dag[["parents"]])
+    children = names(parents)
+    children = gsub('[[:digit:]]+', '', children)
+    arrow_list = unlist(lapply(1:length(children), function(x) paste0(parents[x], " -> ", children[x])))
+    return(arrow_list)
+  }
+}
+
+handler_df = function(x){
+  test_df = data.frame(unlist(lapply(x(), function(handle) {
+    handle()[["distribution"]]
+  })), holder = 1)
+  return(rownames(test_df[test_df[,1]=="binary",]))
+}
+
+get_dist = function(x, y){
+  output = as.character(lapply(y(), function(handle) {
+    handle()[["distribution"]]})[["exposure"]])
+
+  # output = gsub("binary", "dbern(", output )
+  # output = gsub("continuous", "dnorm(", output )
+  output
+
+
+
+}
+
+get_sum_stats = function(x){
+  as.character(lapply(handler(), function(handle) {
+    handle()[["distribution"]]})[["exposure"]])
+  as.double(lapply(handler(), function(handle) {
+    handle()[[2]]})[["exposure"]])
+}
+
+run_code = function(out_code){
+  out_mat = eval(parse(text = out_code))
+  return(out_mat)
+
+
+  # cat(c(paste0("\ndag_1 = function(ate, exp_p, out_p){\n    holder1 = ate \n    holder2 = exp_p \n    holder3 = out_p \n    dag = HydeNetwork("
+  #              ,input$dag_text,")"),
+  #       bi_code,
+  #       cont_code,
+  #       "\n}",
+  #       paste0('\nvariedruns(', input$iteration ,
+  #              ', dag1, exposure = "', input$exp,
+  #              '" , outcome = "', input$out ,
+  #              '" , covariates = ', confounder,
+  #              ' , sb = ', sb,
+  #              ' , ate = ', set_ate,
+  #              ', n = ', input$n_data,
+  #              ')')))
+
+}
