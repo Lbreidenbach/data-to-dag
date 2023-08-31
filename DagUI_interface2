@@ -421,6 +421,32 @@ make_model = function(dag, ate, exp_p, out_p){
   comp_dag = compileJagsModel(dag_1)
   return(comp_dag)
 }
+make_boxplot = function (run, title=NULL, subtitle=NULL){
+  comp_df = as.data.frame(run[[1]])
+  ate_val = as.data.frame(run[[1]])
+
+  names= unlist(lapply(colnames(ate_val), function(y) rep(y, nrow(ate_val))))
+  value= as.numeric(unlist(ate_val))
+  data=tibble(names,value)
+
+  p <- ggplot(data, aes(x=names, y=value, fill=names)) +
+    geom_boxplot(alpha=0.7, outlier.shape = NA) +
+    geom_segment( aes(x=0, xend=length(colnames(ate_val))+1, y=run[[8]][1,1], yend=run[[8]][1,1]), color="navy", linetype = "dashed", lwd = 1) +
+    #scale_y_continuous(limits = quantile(data$value, c(0.1, 0.9))) +
+    coord_flip()+
+    stat_summary(fun=mean, geom="point", shape=20, size=6, color="navy", fill="navy") +
+    theme(legend.position="none") +
+    scale_fill_brewer(palette="Set3") +
+    xlab("Method type") +
+    ylab("Beta") +
+    ggtitle(label = paste(title),
+            subtitle = paste(subtitle)) +
+    theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.text = element_text(size = 14, face = "bold", hjust = 0.5),
+          axis.title = element_text(size = 14, face = "bold", hjust = 0.5))
+  return(p)
+}
 
 varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, inv_covariates = NULL, ate=NULL, n=NULL, exp_p=NULL, out_p=NULL, under_r = 0, over_r = 0, x=5, div = 4, ratio=1, matching=F){
   randomize = function(variable, rmodel){
@@ -473,16 +499,16 @@ varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, i
   temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], under_r = rep(under_r[x], nrow(temp_output[[x]]))))
   partition = laply(temp_output, as.matrix)
   if(is.null(covariates)==T & is.null(inv_covariates)==T){
-    partition = data.frame(calculated_ate = partition[, 2],
-                           lower_int = partition[, 3],
-                           upper_int = partition[, 4],
-                           p_values = partition[, 6],
-                           exp_prevalence = partition[, 8],
-                           out_prevalence = partition[, 9],
-                           sample_population = partition[, 7],
-                           set_ate = partition[, 10],
-                           over_r = partition[,11],
-                           under_r = partition[,12])
+    partition = list(data.frame(calculated_ate = partition[, 2]),
+                     data.frame(lower_int = partition[, 3]),
+                     data.frame(upper_int = partition[, 4]),
+                     data.frame(p_values = partition[, 6]),
+                     data.frame(exp_prevalence = partition[, 8]),
+                     data.frame(out_prevalence = partition[, 9]),
+                     data.frame(sample_population = partition[, 7]),
+                     data.frame(set_ate = partition[, 10]),
+                     data.frame(over_r = partition[,11]),
+                     data.frame(under_r = partition[,12]))
     partition = as.matrix(partition)
     return(partition)
   }
@@ -500,7 +526,221 @@ varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, i
   return(run_list)
 }
 
+ci_ridges = function(run, title =NULL, subtitle=NULL){
+  ate_val = as.data.frame(run[[1]])
+  drawn_ci = beta_sum(run)
+  drawn_ci[drawn_ci==0] =NA
+  drawn_ci[drawn_ci==1] =NA
 
+  # drawn_ci$tag = c(1,1,0,0)
+  # drawn_ci = drawn_ci[!(duplicated(drawn_ci[1:3]) | duplicated(drawn_ci[1:3], fromLast = TRUE)), ]
+  # drawn_ci = drawn_ci[drawn_ci$tag==1,]
+  # drawn_ci = drawn_ci[-length(drawn_ci)]
+  upper = sapply(drawn_ci[7,], function(x) rep(x, length(ate_val[[1]])))
+  lower = sapply(drawn_ci[8,], function(x) rep(x, length(ate_val[[1]])))
+  #rep(drawn_ci[,1],length(comp_df[[1]]))
+
+
+  names= unlist(lapply(colnames(ate_val), function(y) rep(y, nrow(ate_val))))
+  value= as.numeric(unlist(ate_val))
+  upper = 1- as.numeric(unlist(upper))
+  lower = as.numeric(unlist(lower))
+
+  data=tibble(names,value, upper, lower)
+  data$tag =0
+  data[data$value>0,]$tag = 1
+  data$names = as.factor(data$names)
+  data$tag = as.character(data$tag)
+
+  lines = drawn_ci[1:2,]
+  nas_df = drawn_ci[7:8,]
+  #na_dex
+  inf_dex = which(is.na(nas_df[1,]))
+  neg_inf_dex = which(is.na(nas_df[2,]))
+
+  lines[1, inf_dex]= Inf
+  lines[2, neg_inf_dex]= -Inf
+
+  factor_df = as.data.frame(unique(as.integer(data$names)))
+  factor_df = t(factor_df)
+  colnames(factor_df) = unique(as.character(data$names))
+  rownames(factor_df) = "i"
+  lines = rbind(lines, factor_df)
+  lines = lines[,order(lines[nrow(lines),])]
+
+  drawn_ci = rbind(drawn_ci, factor_df)
+  drawn_ci = drawn_ci[,order(drawn_ci[nrow(drawn_ci),])]
+
+  ###WORKING LINES
+  p <- ggplot(data, aes(x=value, y=names)) +
+    stat_density_ridges(scale = 0.95,
+                        quantile_lines = TRUE,
+                        quantile_fun = function(x, ...) quantile(x, probs =
+                                                                   c(sort(c(mean(data[data$value == x,]$lower))), sort(c(mean(data[data$value == x,]$upper)))), na.rm = TRUE)
+    ) +
+    theme_ridges(center = TRUE) +
+    ylab("Anaylsis Performed") +
+    xlab("Estimated Beta") +
+    ggtitle(label = paste(title),
+            subtitle = paste(subtitle)) +
+    theme(plot.title = element_text(size = 18, face = "bold"),
+          plot.subtitle = element_text(size = 12),
+          axis.text = element_text(size = 14, face = "bold"),
+          axis.title = element_text(size = 14, face = "bold")) +
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_discrete(expand = expansion(mult = c(0.01, .1))) +
+    if(max(data$value) > 10 | min(data$value < -10)){
+      xlim(limits[1],limits[2])
+    }
+  p
+
+  d <- ggplot_build(p)$data[[1]]
+  ribbon = function(upper, lower, i) {
+    if(is.na(drawn_ci[1,i]) == TRUE & is.na(drawn_ci[2,i]) == TRUE){
+      return()
+    }
+    q = geom_ribbon(
+      data = transform(subset(d, x <= upper & x >= lower & ymin == i), names = group),
+      aes(x, ymin = ymin, ymax = ymax, group = group),
+      fill = "lightblue2")
+    return(q)
+  }
+  # i = 3
+  # p + ribbon(lines[1,i], lines[2,i], lines[3,i])
+  # p + ribbon(-0.1, -0.2, 2)
+  q = p + lapply(c(1:ncol(lines)), function(x) ribbon(lines[1,x],lines[2,x],lines[3,x]))
+
+  # q =p + geom_ribbon(
+  #   data = transform(subset(d, x <= 0.0373545924 & x >= -0.0412792948 & ymin == 3), names = group),
+  #   aes(x, ymin = ymin, ymax = ymax, group = group),
+  #   fill = "lightblue2") +
+  #   geom_ribbon(
+  #     data = transform(subset(d, x <= 0.0348230349 & x >= -0.0357772047  & ymin == 2), names = group),
+  #     aes(x, ymin = ymin, ymax = ymax, group = group),
+  #     fill = "lightblue2") +
+  #   geom_ribbon(
+  #     data = transform(subset(d, ymin == 1), names = group),
+  #     aes(x, ymin = ymin, ymax = ymax, group = group),
+  #     fill = "lightblue2") +
+  #   geom_segment( aes(y=1, yend=length(colnames(ate_val))+1, x=run[[8]][1], xend=run[[8]][1]), color="navy", linetype = "dashed", lwd = 1)
+
+  r = q+ stat_density_ridges(scale = 0.95,
+                             quantile_lines = TRUE,
+                             lwd = 1,
+                             quantile_fun = function(x, ...) quantile(x, probs =
+                                                                        c(sort(c(mean(data[data$value == x,]$lower))), sort(c(mean(data[data$value == x,]$upper)))), na.rm = TRUE),
+                             fill = "lightblue2",
+                             alpha= 0.01) +
+    geom_segment( aes(y=1, yend=length(colnames(ate_val))+1, x=run[[8]][1], xend=run[[8]][1]), color="navy", linetype = "dashed", lwd = 1)
+
+
+
+
+  ###
+
+
+
+  # Construct the six grobs - three symbols and three labels
+  L1 = rectGrob(height = .5, width = .5, gp = gpar(fill = "lightblue2", col = NA))
+  L2 = rectGrob(height = .5, width = .5, gp = gpar(fill = "grey50", col = NA))
+  T1 = textGrob("Yes", x = .2, just = "left")
+  T2 = textGrob("No", x = .2, just = "left")
+
+
+  # Construct a gtable - 2 columns X 4 rows
+  leg = gtable(width = unit(c(1,1), "cm"), height = unit(c(1.8,1,1), "cm"))
+
+  # Place the six grob into the table
+  leg = gtable_add_grob(leg, L1, t=2, l=1)
+  leg = gtable_add_grob(leg, L2, t=3, l=1)
+  leg = gtable_add_grob(leg, T1, t=2, l=2)
+  leg = gtable_add_grob(leg, T2, t=3, l=2)
+
+  # Give it a title (if needed)
+  leg = gtable_add_grob(leg, textGrob(expression(bold("True B in\n95% CI?")), vjust = 2), t=1, l=1, r=2)
+  #leg = gtable_add_grob(leg, textGrob(expression(bold("95% CI?"))), t=2, l=1, r=2)
+  # Get the ggplot grob for plot1
+  g = ggplotGrob(r)
+
+  # Get the position of the panel,
+  # add a column to the right of the panel,
+  # put the legend into that column,
+  # and then add another spacing column
+  pos = g$layout[grepl("panel", g$layout$name), c('t', 'l')]
+  g = gtable_add_cols(g, sum(leg$widths), pos$l)
+  g = gtable_add_grob(g, leg, t = pos$t, l = pos$l + 1)
+  g = gtable_add_cols(g, unit(6, "pt"), pos$l)
+
+  # Draw it
+  grid.newpage()
+  return(grid.draw(g))
+
+}
+beta_sum = function(run){
+  ate = run[[8]][1]
+  calc_ate = as.data.frame(run[[1]])
+  lower_int = as.data.frame(run[[2]])
+  upper_int = as.data.frame(run[[3]])
+
+
+  names= unlist(lapply(colnames(lower_int), function(y) rep(y, nrow(lower_int))))
+  upper_int= as.numeric(unlist(upper_int))
+  lower_int = as.numeric(unlist(lower_int))
+  calc_ate = as.numeric(unlist(calc_ate))
+  data=tibble(names,lower_int, upper_int, calc_ate)
+  data_ci = data %>% filter(lower_int <= ate & upper_int >= ate)
+  data_under_ci = data %>% filter(upper_int < ate)
+  data_over_ci = data %>% filter(lower_int > ate)
+  data_ci$in_ci = 1
+  data_under_ci$in_ci = 0
+  data_over_ci$in_ci = 0
+  data_ci$over_ci = 0
+  data_ci$under_ci = 0
+  data_under_ci$over_ci = 0
+  data_over_ci$over_ci = 1
+  data_under_ci$under_ci = 1
+  data_over_ci$under_ci = 0
+
+  data = rbind(data_ci, data_over_ci, data_under_ci)
+  #max((data_ci %>% filter(names == "logistic_or"))[4])
+  max_ci_beta = sapply(unique(data$names), function(x) max((data_ci %>% filter(names == x))[4]))
+  min_ci_beta = sapply(unique(data$names), function(x) min((data_ci %>% filter(names == x))[4]))
+  max_beta = sapply(unique(data$names), function(x) max((data %>% filter(names == x))[4]))
+  min_beta = sapply(unique(data$names), function(x) min((data %>% filter(names == x))[4]))
+  mean_beta = sapply(as.list(unique(data$names)), function(x) mean((data %>% filter(names == x))[[4]]))
+  sd_beta = sapply(as.list(unique(data$names)), function(x) sd((data %>% filter(names == x))[[4]]))
+  percent_over_ci = sapply(unique(data$names), function(x) length((data_over_ci %>% filter(names == x))[[4]])/length(run[[1]][,1]))
+  percent_under_ci = sapply(unique(data$names), function(x) length((data_under_ci %>% filter(names == x))[[4]])/length(run[[1]][,1]))
+  beta_in_ci = as.data.frame(rbind(max_ci_beta, min_ci_beta, max_beta, min_beta, mean_beta, sd_beta, percent_over_ci, percent_under_ci))
+  beta_in_ci[sapply(beta_in_ci, is.infinite)]=NA
+  beta_in_ci = beta_in_ci[,c(colnames(run[[1]]))] #reorder columns to original run order for indexing
+  return(beta_in_ci)
+}
+sum_table_graphic = function(run){
+  myt <- ttheme_default(
+    rowhead = list(fg_params=list(cex = 1.0, fontface = "bold"), bg_params=list(fill="gray80", col = "black")),
+    colhead = list(bg_params = list(col = "black")),
+    core = list(bg_params = list(fill = "white", col = "black"))
+  )
+
+
+
+  the_table = beta_sum(run)
+  the_table = the_table[5:8,]
+  the_table[3,] = the_table[3,]+ the_table[4,]
+  the_table = the_table[1:3,]
+  the_table[3,] = 100 - the_table[3,]*100
+  the_table = round(the_table,3)
+  rows= c("B estimate\n mean", "B estimate\n std dev", "True B in 95% CI of B estimate (%)")
+  rownames(the_table) = sapply(rows, function(x) paste(strwrap(x, width = 15),  collapse="\n"))
+  cols = colnames(the_table)
+  colnames(the_table) = sapply(cols, function(x) paste(strwrap(x, width = 20),  collapse="\n"))
+  the_table = as.data.frame(t(the_table))
+  g5 <- tableGrob(the_table, theme = myt)
+
+  grid.newpage()
+  return(grid.draw(g5))
+}
 #Ui Facing Functions
 #####
 
@@ -558,8 +798,10 @@ get_sum_stats = function(x){
 }
 
 run_code = function(out_code){
-  out_mat = eval(parse(text = out_code))
-  return(out_mat)
+  eval(parse(text = out_code))
+
+
+  return(make_boxplot(run_1))
 
 
   # cat(c(paste0("\ndag_1 = function(ate, exp_p, out_p){\n    holder1 = ate \n    holder2 = exp_p \n    holder3 = out_p \n    dag = HydeNetwork("
