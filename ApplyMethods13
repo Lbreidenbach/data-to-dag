@@ -11,6 +11,7 @@ library(GGally)
 library(ggridges)
 library("reshape2")
 library(gridExtra)
+library(logisticRR)
 
 #Mechanical functions######
 #x is numeric
@@ -189,6 +190,26 @@ odds_ratio = function(exposure, outcome, covariates=NULL, df){
                      p_val = coef(summary(cont_glm))[2,4],
                      n = nrow(df))
   row.names(or_df) = "logistic_or"
+  return(or_df)
+}
+risk_ratio = function(exposure, outcome, covariates=NULL, df){
+  vars = c(exposure, covariates)
+  cont_glm = logisticRR(as.formula(paste(outcome, paste(vars, collapse=" + "), sep=" ~ ")), data = df)
+  exp_coef = cont_glm$fit$coefficients[[2]]
+  exp_rr = cont_glm$RR
+  or_confint = confint.default(cont_glm$fit, trace = F)
+  or_upper = or_confint[2,2]
+  or_lower = or_confint[2,1]
+  int_diff = or_upper - or_lower
+
+  or_df = data.frame("odds_ratio" = exp_rr,
+                     beta = exp_coef,
+                     lower_int = or_lower,
+                     upper_int = or_upper,
+                     confint_diff = abs(int_diff),
+                     p_val = coef(summary(cont_glm$fit))[2,4],
+                     n = nrow(df))
+  row.names(or_df) = "rr_regression"
   return(or_df)
 }
 
@@ -544,16 +565,16 @@ varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, i
   temp_output =lapply(c(1:runs), function(x) cbind(temp_output[[x]], under_r = rep(under_r[x], nrow(temp_output[[x]]))))
   partition = laply(temp_output, as.matrix)
   if(is.null(covariates)==T & is.null(inv_covariates)==T){
-    partition = data.frame(calculated_ate = partition[, 2],
-                     lower_int = partition[, 3],
-                     upper_int = partition[, 4],
-                     p_values = partition[, 6],
-                     exp_prevalence = partition[, 8],
-                     out_prevalence = partition[, 9],
-                     sample_population = partition[, 7],
-                     set_ate = partition[, 10],
-                     over_r = partition[,11],
-                     under_r = partition[,12])
+    partition = list(data.frame(calculated_ate = partition[, 2]),
+                     data.frame(lower_int = partition[, 3]),
+                     data.frame(upper_int = partition[, 4]),
+                     data.frame(p_values = partition[, 6]),
+                     data.frame(exp_prevalence = partition[, 8]),
+                     data.frame(out_prevalence = partition[, 9]),
+                     data.frame(sample_population = partition[, 7]),
+                     data.frame(set_ate = partition[, 10]),
+                     data.frame(over_r = partition[,11]),
+                     data.frame(under_r = partition[,12]))
     partition = as.matrix(partition)
     return(partition)
   }
@@ -570,14 +591,29 @@ varied_runs = function(runs, dag, exposure, outcome, covariates=NULL, sb=NULL, i
 
   return(run_list)
 }
+
 #####
 
-reparse_runs = function(run_list, method, list_names){
+reparse_runs = function(run_list, method, list_names=as.character(1:length(run_list))){
   extract_method = function(run){
     m_list = lapply(c(1:length(run)),function(x) run[[x]][,colnames(run[[1]]) == method])
     names(m_list) = names(run)
     m_list = as.data.frame(m_list)
     return(m_list)
+  }
+  if(length(run_list)==1){
+    rep_size = nrow(as.data.frame(run_list))
+    dim_holder = data.frame("calculated_ate" = rep(NA, rep_size),
+                            "lower_int" = rep(NA, rep_size),
+                            "upper_int" = rep(NA, rep_size),
+                            "p_values" = rep(NA, rep_size),
+                            "exp_prevalence" = rep(NA,rep_size),
+                            "out_prevalence" = rep(NA,rep_size),
+                            "sample_population" = rep(NA,rep_size),
+                            "set_ate" = rep(NA,rep_size),
+                            "over_r"= rep(NA,rep_size),
+                            "under_r" = rep(NA,rep_size))
+    run_list = list(dim_holder, run_list)
   }
   names(run_list) = list_names
   index = sapply(run_list, is.list)
@@ -623,7 +659,7 @@ make_boxplot = function (run, title=NULL, subtitle=NULL){
 
   p <- ggplot(data, aes(x=names, y=value, fill=names)) +
     geom_boxplot(alpha=0.7, outlier.shape = NA) +
-    geom_segment( aes(x=0, xend=length(colnames(comp_df))+1, y=run[[8]][1], yend=run[[8]][1]), color="navy", linetype = "dashed", lwd = 1) +
+    geom_segment( aes(x=0, xend=length(colnames(ate_val))+1, y=run[[8]][1,1], yend=run[[8]][1,1]), color="navy", linetype = "dashed", lwd = 1) +
     #scale_y_continuous(limits = quantile(data$value, c(0.1, 0.9))) +
     coord_flip()+
     stat_summary(fun=mean, geom="point", shape=20, size=6, color="navy", fill="navy") +
@@ -1701,8 +1737,8 @@ cov_na_nodes = function(ate, exp_p, out_p){
 # test_cov = varied_runs(100, test_dag, "depression", "diabetes", c("sex", "age"), n=100000, ate = v, exp_p = a, out_p = 0.11,  under_r = 0, over_r = 0)
 # test_cov_sb = varied_runs(100, test_dag, "depression", "diabetes", c("sex", "age"), sb = "in_biovu", n=1000000, ate = v, exp_p = a, out_p = 0.11,  under_r = 0, over_r = 0)
 
-test_m = varied_runs(300, prs_dag, "prs", "depression", n=10000, ate = 0.07, exp_p = a, out_p = 0.11,  under_r = 0, over_r = 0.15)
-test_m_sb = varied_runs(300, prs_dag, "prs", "depression", sb = "in_biovu",  n=200000, ate = 0.07, exp_p = a, out_p = 0.11,  under_r = 0, over_r = 0.5)
+test_m = varied_runs(50, prs_dag, "prs", "depression", n=10000, ate = 0.07, exp_p = .1, out_p = 0.11,  under_r = 0, over_r = 0.15)
+test_m_sb = varied_runs(50, prs_dag, "prs", "depression", "in_biovu",  n=10000, ate = 0.07, exp_p = .1, out_p = 0.11,  under_r = 0, over_r = 0.5)
 
 # rep_test = reparse_runs(list(test, test_sb, test_cov, test_cov_sb), "logistic_or", c("naive", "naive, sb", "confounder adjusted, no sb", "confounder adjusted, sb"))
 rep_test_2 = reparse_runs(list(test_m, test_m_sb), "logistic_or", c("naive", "sb"))
