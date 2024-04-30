@@ -5,7 +5,7 @@ library(rjags)
 library(MatchIt)
 library(ggplot2)
 library(plyr)
-#library(EmpiricalBrownsMethod)
+
 library(dplyr)
 library(gtable)
 library(grid)
@@ -13,8 +13,9 @@ library(GGally)
 library(ggridges)
 library("reshape2")
 library(gridExtra)
-source("plot_dag_ui.R")
+source("plot_dag_ui2.R")
 library(purrr)
+
 
 set_p = function(p,model){
   p2 = log(p/(1-p))
@@ -123,22 +124,25 @@ ui <- fluidPage(
                             uiOutput("sel_op"),
                             uiOutput("conf"),
                             uiOutput("conf_op"),
-                            numericInput("n_data", "Number of samples per dataset \n(takes a minute to calculate when n>100,000 n>1,000,000 not recommended)", 1000, min = 5, step = 1),
-                            numericInput("iteration", "Number of datasets created and analyzed \n(i>300 not recommended)", 10, min = 2, step = 1),
+                            #numericInput("n_data", "Number of samples per dataset \n(takes a minute to calculate when n>100,000 n>1,000,000 not recommended)", 10000, min = 5, step = 1),
+                            #numericInput("iteration", "Number of datasets created and analyzed \n(i>300 not recommended)", 100, min = 2, step = 1),
                             actionButton("sim", "Simulate!")
                             ),
-               mainPanel(fluidRow(column(12, mainPanel(h3("Ta-Da!", align ="center"),
+               mainPanel(fluidRow(column(12, mainPanel(h4("Plot appears here once analysis is set and the simulate button is pressed ", align ="center"),
                                                        plotOutput("bn_results"),
+                                                       h5("Code for running set analysis", align ="center"),
+                                                       verbatimTextOutput("analysis_info"),
                                                        width = 12)
                                         )
-               ),
-               fluidRow(column(12, mainPanel(h3("Code for your specified Bayesian Network", align ="center"),
-                                             p("If the Hydenet library is in use, this code can be copy/pasted from this box to get a working dag object and results matrix"),
-                                             verbatimTextOutput("bn_info"),
-                                             width = 12)
                )
+
                )
-               )
+             ),
+             fluidRow(column(12, mainPanel(h3("Code for your specified Bayesian Network", align ="center"),
+                                           p("If the Hydenet library is in use, this code can be copy/pasted from this box to get a working dag object and results matrix"),
+                                           verbatimTextOutput("bn_info"),
+                                           width = 12)
+             )
              )
     )
   ),
@@ -150,14 +154,13 @@ ui <- fluidPage(
 server <- function(input, output, session) {
 
   handler = reactiveVal(list())
+  node_ids = reactiveVal()
+  beta_ids = reactiveVal()
+  dag_code = reactiveVal()
 
   output$value = renderGrViz({ dag_ui(paste(input$dag_text)) })
 
-
   observeEvent(input$dag_text, {
-
-
-
     #beta interface
     beta_id = get_arrows(input$dag_text)
     output$beta_box = renderUI(
@@ -166,13 +169,16 @@ server <- function(input, output, session) {
     )
 
     #node distribution interface
-    x <- get_nodes(input$dag_text)
+    x = get_nodes(input$dag_text)
     ui_num = length(x)
     new_id = unlist(lapply(c(1:ui_num), function(y) paste(x[y])))
 
     output$node_box = renderUI({
       map(new_id, ~node_ui(.x))
     })
+
+    node_ids(x)
+    beta_ids(beta_id)
 
     handler_list <- isolate(handler())
 
@@ -184,466 +190,336 @@ server <- function(input, output, session) {
     handler(handler_list)
 
 
-    output$exp = renderUI(
-
-
-      fluidRow(column(12,
-                      selectInput("exp", "Exposure", choices = x)
-                      )
-               )
-
-    )
-    output$out = renderUI(
-
-
-      fluidRow(column(12,
-                      selectInput("out", "Outcome", choices = x[!x==input$exp])
-                      )
-      )
-
-    )
-
-
-
-    output$sel = renderUI(
-      if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
-        fluidRow(column(12,
-                        selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c( "No"), selected = "No")
-        )
-        )
-
-      }else{
-        fluidRow(column(12,
-                        selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c("Yes", "No"), selected = "No")
-        )
-        )
-
-      }
-
-      # if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
-      #   input$selection = "No"
-      # }
-
-    )
-
-
-    output$sel_op = renderUI(
-      if(input$selection == "Yes"){
-
-          fluidRow(column(12,
-                          radioButtons("sel", "Selection Node", choices = handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])
-          )
-          )
-
-      }else{
-
-      }
-
-
-
-    )
-
-    output$conf = renderUI(
-      fluidRow(column(12,
-                      selectInput("adjust", "Adjust for confounders?", choices = c("Yes", "No"), selected = "No")
-      )
-      )
-
-    )
-
-    output$conf_op = renderUI(
-      if(input$adjust == "Yes"){
-        if(input$selection == "Yes"){
-          fluidRow(column(12,
-                          checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out & !x==input$sel])
-          )
-          )
-        }else{
-          fluidRow(column(12,
-                          checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out])
-          )
-          )
-
-        }
-
-      }else{
-
-      }
-
-    )
-
-    output$bn_info = renderPrint({
-
-      test_df = data.frame(unlist(lapply(handler(), function(handle) {
-        handle()[["distribution"]]
-      })), holder = 1)
-
-      test_df$prevalence = rep(0.5, length(x))
-      test_df$mean = rep(0, length(x))
-      test_df$std_dev = rep(1, length(x))
-
-      rownames(test_df) = x
-
-      # test_df[,3] = data.frame(unlist(lapply(handler(), function(handle) {
-      #   handle()[["prevalence"]]
-      # })))
-
-      if("binary" %in% test_df[[1]]){
-        prev_vals = test_df[,3] = unlist(lapply(handler(), function(handle) {
-          handle()[["prevalence"]]
-        }))
-        test_df[names(prev_vals), 3] = prev_vals
-
-      }
-
-      if("continuous" %in% test_df[[1]]){
-        mean_vals = unlist(lapply(handler(), function(handle) {
-          handle()[["mean"]]
-        }))
-        test_df[names(mean_vals), 4] = mean_vals
-
-        std_vals = unlist(lapply(handler(), function(handle) {
-          handle()[["std_dev"]]
-        }))
-        test_df[names(std_vals), 5] = std_vals
-      }
-
-
-
-      colnames(test_df) = c("distribution", "holder", "prevalence", "mean", "std_dev")
-      beta_df = data.frame(parent = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][1]})),
-                           child = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][2]})),
-                           beta_vals = unlist(lapply(beta_id, function(x) input[[paste(x)]]))
-                           )
-
-
-
-      bi_nodes_df = test_df[test_df$distribution=="binary",]
-      cont_nodes_df = test_df[test_df$distribution=="continuous",]
-
-
-
-      parent_list = lapply(c(1:length(rownames(test_df))), function(y) beta_df[beta_df[2]==rownames(test_df)[[y]], c(1,3)]) #child == y from the apply functions
-      names(parent_list) = rownames(test_df)
-
-
-      get_type =function(i,y){
-        if(length(parent_list[[i]][[1]])==0){
-          return(0)
-        }
-        if(test_df[parent_list[[i]][y,1],1]=="binary"){
-          col_num = 3
-        }else if(test_df[parent_list[[i]][y,1],1]=="continuous"){
-          col_num = 4
-        }
-        as.numeric(test_df[parent_list[[i]][y,1],col_num])
-
-      }
-      get_lgm = function(i){
-        if(length(parent_list[[i]][[1]]) == 0){
-          return("")
-        }
-        out_lgm = paste(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
-          paste0(
-            parent_list[[i]][y,2],
-            '," * ',
-            parent_list[[i]][y,1],
-            ' + ",')
-        })), collapse = " " )
-
-        return(out_lgm)
-      }
-
-      get_linker = function(i){
-        if(length(parent_list[[i]][[1]])==0){
-          return(set_p(as.numeric(test_df[rownames(test_df)[[i]],3]), 0))
-        }
-        set_p(as.numeric(test_df[rownames(test_df)[[i]],3]),
-              sum(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
-                as.numeric(parent_list[[i]][y,2]) *
-                  get_type(i,y)
-              }))))
-      }
-
-      if(nrow(bi_nodes_df)>0){
-        bi_code = unlist(lapply(c(1:length(rownames(bi_nodes_df))), function(i){paste0('\n    dag = setNode(dag, ',
-                                                                                       rownames(bi_nodes_df)[[i]],
-                                                                                       ', nodeType = "dbern", prob = paste0("ilogit(",',
-                                                                                       paste(get_lgm(which(rownames(test_df) == rownames(bi_nodes_df)[[i]])), get_linker(i), collapse = " "),',")"))')}))
-      }else{
-        bi_code = NULL
-      }
-
-      if(nrow(cont_nodes_df)>0){
-        cont_code = unlist(lapply(c(1:length(rownames(cont_nodes_df))), function(i)
-        {paste0('\n    dag = setNode(dag, ',
-                rownames(cont_nodes_df)[[i]], ', nodeType = "dnorm", mu = paste0(',
-                get_lgm(which(rownames(test_df) == rownames(cont_nodes_df)[[i]])),
-                cont_nodes_df[i,4],
-                "), tau = ",
-                cont_nodes_df[i,5],
-                ")")
-        }))
-      }else{
-        cont_code = NULL
-      }
-
-      set_ate = as.numeric(beta_df[beta_df$parent == input$exp & beta_df$child == input$out, "beta_vals"])
-      if(length(set_ate)==0){
-        set_ate=0
-      }
-
-      #Current Bug: if there's no valid selection node and the user has it set to Yes, then sb is ""
-      if(input$selection == "Yes"){
-        sb = paste0('"', input$sel, '"')
-      }else{
-        sb = format(NULL)
-      }
-
-
-
-      if(input$adjust == "Yes"){
-        if(length(input$conf)==1){
-          confounder = paste0('"', input$conf, '"')
-
-        }else{
-          confounder = list(format(input$conf))
-        }
-
-      }else{
-        confounder = format(NULL)
-      }
-
-      cat(c(paste0("\ndag_1 = function(ate, exp_p, out_p){\n    holder1 = ate \n    holder2 = exp_p \n    holder3 = out_p \n    dag = HydeNetwork("
-                   ,input$dag_text,")"),
-            bi_code,
-            cont_code,
-            "\n}",
-            paste0('\nvaried_runs(', input$iteration ,
-                   ', dag_1, exposure = "', input$exp,
-                   '" , outcome = "', input$out ,
-                   '" , covariates = ', confounder,
-                   ' , sb = ', sb,
-                   ' , ate = ', set_ate,
-                   ', n = ', input$n_data,
-                   ')')))
-
-
-
-
-      # cat(c(paste0("\ndag = HydeNetwork(",input$dag_text,")\n"),
-      #       bi_code,
-      #       cont_code
-      #       ))
-
-      # test_dag = function(ate, exp_p, out_p){
-      #   oop = out_p
-      #   oppy = exp_p
-      #   dag = HydeNetwork(~age
-      #                     + sex
-      #                     + depression| sex * age
-      #                     + diabetes|sex *  age
-      #                     + in_biovu| sex * age * depression * diabetes)
-      #
-      #   plot(dag)
-      #
-      #   dag = setNode(dag, age, nodeType = "dnorm", mu =1, tau = 1 )
-      #   dag = setNode(dag, sex, nodeType = "dbern", prob = 0.505)
-      #   dag = setNode(dag, depression, nodeType = "dbern",
-      #                 prob = paste0("ilogit(", 0.1, "* age +",
-      #                               0.9, "* sex +",
-      #                               set_p(0.16, 0.1 * 1
-      #                                     + 0.505 * 0.9)
-      #                               ,")")
-      #   )
-      #   dag = setNode(dag, diabetes, nodeType = "dbern",
-      #                 prob = paste0("ilogit(", 0.05, "* age + ",
-      #                               -0.094, "* sex +",
-      #                               ate, "* depression +",
-      #                               set_p(0.074, 0.05 * 1
-      #                                     + 0.505 * -0.094
-      #                                     + ate * 0.16)
-      #                               ,")")
-      #   )
-      #   dag = setNode(dag, in_biovu, nodeType = "dbern",
-      #                 prob = paste0("ilogit(", 0.1, "* age + ",
-      #                               0.25, "* sex +",
-      #                               0.23, "* depression +",
-      #                               0.92, "* diabetes +",
-      #                               set_p(0.1, 0.1 * 1
-      #                                     + 0.25 * 0.505
-      #                                     + 0.92 * 0.074
-      #                                     + 0.23 * 0.16)
-      #                               ,")")
-      #   )
-      # }
-
-
-    })
-    output$bn_results = renderPlot({
-      test_df = data.frame(unlist(lapply(handler(), function(handle) {
-        handle()[["distribution"]]
-      })), holder = 1)
-
-      test_df$prevalence = rep(0.5, length(x))
-      test_df$mean = rep(0, length(x))
-      test_df$std_dev = rep(1, length(x))
-
-      rownames(test_df) = x
-
-      # test_df[,3] = data.frame(unlist(lapply(handler(), function(handle) {
-      #   handle()[["prevalence"]]
-      # })))
-
-      if("binary" %in% test_df[[1]]){
-        prev_vals = test_df[,3] = unlist(lapply(handler(), function(handle) {
-          handle()[["prevalence"]]
-        }))
-        test_df[names(prev_vals), 3] = prev_vals
-
-      }
-
-      if("continuous" %in% test_df[[1]]){
-        mean_vals = unlist(lapply(handler(), function(handle) {
-          handle()[["mean"]]
-        }))
-        test_df[names(mean_vals), 4] = mean_vals
-
-        std_vals = unlist(lapply(handler(), function(handle) {
-          handle()[["std_dev"]]
-        }))
-        test_df[names(std_vals), 5] = std_vals
-      }
-
-
-
-      colnames(test_df) = c("distribution", "holder", "prevalence", "mean", "std_dev")
-      beta_df = data.frame(parent = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][1]})),
-                           child = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][2]})),
-                           beta_vals = unlist(lapply(beta_id, function(x) input[[paste(x)]]))
-      )
-
-
-
-      bi_nodes_df = test_df[test_df$distribution=="binary",]
-      cont_nodes_df = test_df[test_df$distribution=="continuous",]
-
-
-
-      parent_list = lapply(c(1:length(rownames(test_df))), function(y) beta_df[beta_df[2]==rownames(test_df)[[y]], c(1,3)]) #child == y from the apply functions
-      names(parent_list) = rownames(test_df)
-
-
-      get_type =function(i,y){
-        if(length(parent_list[[i]][[1]])==0){
-          return(0)
-        }
-        if(test_df[parent_list[[i]][y,1],1]=="binary"){
-          col_num = 3
-        }else if(test_df[parent_list[[i]][y,1],1]=="continuous"){
-          col_num = 4
-        }
-        as.numeric(test_df[parent_list[[i]][y,1],col_num])
-
-      }
-      get_lgm = function(i){
-        if(length(parent_list[[i]][[1]]) == 0){
-          return("")
-        }
-        out_lgm = paste(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
-          paste0(
-            parent_list[[i]][y,2],
-            '," * ',
-            parent_list[[i]][y,1],
-            ' + ",')
-        })), collapse = " " )
-
-        return(out_lgm)
-      }
-
-      get_linker = function(i){
-        if(length(parent_list[[i]][[1]])==0){
-          return(set_p(as.numeric(test_df[rownames(test_df)[[i]],3]), 0))
-        }
-        set_p(as.numeric(test_df[rownames(test_df)[[i]],3]),
-              sum(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
-                as.numeric(parent_list[[i]][y,2]) *
-                  get_type(i,y)
-              }))))
-      }
-
-      if(nrow(bi_nodes_df)>0){
-        bi_code = unlist(lapply(c(1:length(rownames(bi_nodes_df))), function(i){paste0('\n    dag = setNode(dag, ',
-                                                                                       rownames(bi_nodes_df)[[i]],
-                                                                                       ', nodeType = "dbern", prob = paste0("ilogit(",',
-                                                                                       paste(get_lgm(which(rownames(test_df) == rownames(bi_nodes_df)[[i]])), get_linker(i), collapse = " "),',")"))')}))
-      }else{
-        bi_code = NULL
-      }
-
-      if(nrow(cont_nodes_df)>0){
-        cont_code = unlist(lapply(c(1:length(rownames(cont_nodes_df))), function(i)
-        {paste0('\n    dag = setNode(dag, ',
-                rownames(cont_nodes_df)[[i]], ', nodeType = "dnorm", mu = paste0(',
-                get_lgm(which(rownames(test_df) == rownames(cont_nodes_df)[[i]])),
-                cont_nodes_df[i,4],
-                "), tau = ",
-                cont_nodes_df[i,5],
-                ")")
-        }))
-      }else{
-        cont_code = NULL
-      }
-
-      set_ate = as.numeric(beta_df[beta_df$parent == input$exp & beta_df$child == input$out, "beta_vals"])
-      if(length(set_ate)==0){
-        set_ate=0
-      }
-
-      #Current Bug: if there's no valid selection node and the user has it set to Yes, then sb is ""
-      if(input$selection == "Yes"){
-        sb = paste0('"', input$sel, '"')
-      }else{
-        sb = format(NULL)
-      }
-
-
-
-      if(input$adjust == "Yes"){
-        if(length(input$conf)==1){
-          confounder = paste0('"', input$conf, '"')
-
-        }else{
-          confounder = list(format(input$conf))
-        }
-
-      }else{
-        confounder = format(NULL)
-      }
-
-      #getting closer with running code, consider saving varied runs as it's own object so that way visuals can be made
-
-      outcome = capture.output(cat(c(paste0("\ndag_1 = function(ate, exp_p, out_p){\n    holder1 = ate \n    holder2 = exp_p \n    holder3 = out_p \n    dag = HydeNetwork("
-                   ,input$dag_text,")"),
-            bi_code,
-            cont_code,
-            "\n}",
-            paste0('\nrun_1 = varied_runs(', input$iteration ,
-                   ', dag_1, exposure = "', input$exp,
-                   '" , outcome = "', input$out ,
-                   '" , covariates = ', confounder,
-                   ' , sb = ', sb,
-                   ' , ate = ', set_ate,
-                   ', n = ', input$n_data,
-                   ')'))))
-      #run_code(input$dag_text, bi_code, cont_code)
-      try_1 = run_code(outcome)
-      try_1
-
-    })
 
 
   })
+
+  output$exp = renderUI({
+    x = node_ids()
+
+    fluidRow(column(12,
+                    selectInput("exp", "Exposure", choices = x)
+    )
+    )
+
+  })
+
+  output$out = renderUI({
+
+
+    fluidRow(column(12,
+                    selectInput("out", "Outcome (Node must be binary", choices = handler_df(handler)[!handler_df(handler)==input$exp])
+    )
+    )
+
+  })
+
+  output$sel = renderUI({
+    if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
+      fluidRow(column(12,
+                      selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c( "No"), selected = "No")
+      )
+      )
+
+    }else{
+      fluidRow(column(12,
+                      selectInput("selection", "Choose a node that represents selection bias? (Node must be binary)", choices = c("Yes", "No"), selected = "No")
+      )
+      )
+
+    }
+
+    # if(length(handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])==0){
+    #   input$selection = "No"
+    # }
+
+  })
+
+  output$sel_op = renderUI({
+    if(input$selection == "Yes"){
+
+      fluidRow(column(12,
+                      radioButtons("sel", "Selection Node", choices = handler_df(handler)[!handler_df(handler)==input$exp & !handler_df(handler)==input$out])
+      )
+      )
+
+    }else{
+
+    }
+
+
+
+  })
+
+  output$conf = renderUI({
+    fluidRow(column(12,
+                    selectInput("adjust", "Adjust for confounders?", choices = c("Yes", "No"), selected = "No")
+    )
+    )
+
+  })
+
+  output$conf_op = renderUI({
+    x = node_ids()
+    if(input$adjust == "Yes"){
+      if(input$selection == "Yes"){
+        fluidRow(column(12,
+                        checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out & !x==input$sel])
+        )
+        )
+      }else{
+        fluidRow(column(12,
+                        checkboxGroupInput("conf", "Confounders", x[!x==input$exp & !x==input$out])
+        )
+        )
+
+      }
+
+    }else{
+
+    }
+
+  })
+
+  output$bn_info = renderPrint({
+    x = node_ids()
+    beta_id = beta_ids()
+
+    test_df = data.frame(unlist(lapply(handler(), function(handle) {
+      handle()[["distribution"]]
+    })), holder = 1)
+
+    test_df$prevalence = rep(0.5, length(x))
+    test_df$mean = rep(0, length(x))
+    test_df$std_dev = rep(1, length(x))
+
+    test_df$names = x
+
+    if("binary" %in% test_df[[1]]){
+      prev_vals = test_df[,3] = unlist(lapply(handler(), function(handle) {
+        handle()[["prevalence"]]
+      }))
+      test_df[names(prev_vals), 3] = prev_vals
+
+    }
+
+    if("continuous" %in% test_df[[1]]){
+      mean_vals = unlist(lapply(handler(), function(handle) {
+        handle()[["mean"]]
+      }))
+      test_df[names(mean_vals), 4] = mean_vals
+
+      std_vals = unlist(lapply(handler(), function(handle) {
+        handle()[["std_dev"]]
+      }))
+      test_df[names(std_vals), 5] = std_vals
+    }
+
+
+
+    colnames(test_df) = c("distribution", "holder", "prevalence", "mean", "std_dev", "names")
+    beta_df = data.frame(parent = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][1]})),
+                         child = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][2]})),
+                         beta_vals = unlist(lapply(beta_id, function(x) input[[paste(x)]]))
+    )
+
+
+
+    bi_nodes_df = test_df[test_df$distribution=="binary",]
+    cont_nodes_df = test_df[test_df$distribution=="continuous",]
+
+    parent_list = lapply(c(1:length(rownames(test_df))), function(y) beta_df[beta_df[2]==rownames(test_df)[[y]], c(1,3)]) #child == y from the apply functions
+    names(parent_list) = rownames(test_df)
+
+    node_info_list = lapply(c(1:length(rownames(test_df))), function(y) test_df[rownames(test_df)[[y]], c(1:6)])
+    #node_info_list[name] if you enter name like this it'll return info without indexing issues
+    names(node_info_list) = rownames(test_df)
+
+    #parent_list[[name]][1], get parent names
+    #parent_list[[name]][2], get beta values
+    #node_info_list[[name]][1,3,4,5,6] get node 1.) distribution, 3.) prev, 4.) mean, 5.)std_dev 6.)name
+
+    #make i node name, not index
+    get_glm = function(i){
+      if(nrow(parent_list[[i]]) == 0){
+        return("")
+      }
+      out_glm = paste(unlist(lapply(c(1:nrow(parent_list[[i]])), function(y){
+        paste0(
+          parent_list[[i]][y,2],
+          '," * ',
+          parent_list[[i]][y,1],
+          ' + ",')
+      })), collapse = " " )
+
+      return(out_glm)
+    }
+    get_linker = function(i){
+      if(nrow(parent_list[[i]])==0){
+        return(set_p(node_info_list[[i]][[3]], 0))
+      }
+      set_p(node_info_list[[i]][[3]],
+            sum(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
+              as.numeric(parent_list[[i]][y,2]) *
+                get_type(i,y)
+            }))))
+    }
+    get_type =function(i,y){
+      if(nrow(parent_list[[i]])==0){
+        return(0)
+      }
+      if(node_info_list[[parent_list[[i]][y,1]]][["distribution"]]=="binary"){
+        col_num = "prevalence"
+      }else if(node_info_list[[parent_list[[i]][y,1]]][["distribution"]]=="continuous"){
+        col_num = "mean"
+      }
+      node_info_list[[parent_list[[i]][y,1]]][[col_num]]
+
+    }
+    identity_link = function(i){
+      if(nrow(parent_list[[i]])==0){
+        return(set_p(node_info_list[[i]][[3]], 0))
+      }
+      sum(unlist(lapply(c(1:length(parent_list[[i]][[1]])), function(y){
+              as.numeric(parent_list[[i]][y,2]) *
+                get_type(i,y) *-1
+            })))
+    }
+
+    if(nrow(bi_nodes_df)>0){
+      bi_code = unlist(lapply(rownames(bi_nodes_df), function(i) {paste0(
+        '\ndag = setNode(dag, ',
+        node_info_list[[i]][6],
+        ', nodeType = "dbern", prob = paste0("ilogit(",',
+        paste(get_glm(i), get_linker(i), collapse = " "),',")"))')}
+
+      ))
+    }else{
+      bi_code = NULL
+    }
+
+    if(nrow(cont_nodes_df)>0){
+      cont_code = unlist(lapply(rownames(cont_nodes_df), function(i)
+      {paste0('\ndag = setNode(dag, ',
+              node_info_list[[i]][6], ', nodeType = "dnorm", mu = paste0(',
+              node_info_list[[i]][4],
+              " + ",
+              paste(get_glm(i), identity_link(i), collapse = " "),
+              "), tau = ",
+              (1/sqrt(cont_nodes_df[i,5])),
+              ")")
+      }))
+    }else{
+      cont_code = NULL
+    }
+
+    code_dag = c(paste0("dag = HydeNetwork("
+                        ,input$dag_text,")"),
+                 bi_code,
+                 cont_code, "\n","\n"
+    )
+
+    dag_code(code_dag)
+    cat(code_dag)
+
+    # lapply(c(1:length(x)), function(i) length(parent_list[[i]][[1]]))
+
+  })
+
+  eventReactive(input$sim, {
+    output$bn_results = renderPlot({
+      x = node_ids()
+      beta_id = beta_ids()
+      beta_df = data.frame(parent = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][1]})),
+                           child = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][2]})),
+                           beta_vals = unlist(lapply(beta_id, function(x) input[[paste(x)]]))
+      )
+
+      set_ate = as.numeric(beta_df[beta_df$parent == input$exp & beta_df$child == input$out, "beta_vals"])
+      if(length(set_ate)==0){
+        set_ate=0
+      }
+
+      #Current Bug: if there's no valid selection node and the user has it set to Yes, then sb is ""
+      if(input$selection == "Yes"){
+        sb = paste0('"', input$sel, '"')
+      }else{
+        sb = format(NULL)
+      }
+
+
+
+      if(input$adjust == "Yes"){
+        if(length(input$conf)==1){
+          confounder = paste0('"', input$conf, '"')
+
+        }else{
+          confounder = list(format(input$conf))
+        }
+
+      }else{
+        confounder = format(NULL)
+      }
+
+      outcome = paste0(
+        '\nrun_1 = varied_runs(', 100,
+        ', dag, exposure = "', input$exp,
+        '" , outcome = "', input$out ,
+        '" , covariates = ', confounder,
+        ' , sb = ', sb,
+        ', n = ', 10000,
+        ')')
+      user_code = capture.output(cat(c(dag_code(), outcome)))
+      run_code(user_code)
+
+    })
+    output$analysis_info = renderPrint({
+      x = node_ids()
+      beta_id = beta_ids()
+      beta_df = data.frame(parent = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][1]})),
+                           child = unlist(lapply(beta_id, function(x){strsplit(x, " -> ")[[1]][2]})),
+                           beta_vals = unlist(lapply(beta_id, function(x) input[[paste(x)]]))
+      )
+
+      set_ate = as.numeric(beta_df[beta_df$parent == input$exp & beta_df$child == input$out, "beta_vals"])
+      if(length(set_ate)==0){
+        set_ate=0
+      }
+
+      #Current Bug: if there's no valid selection node and the user has it set to Yes, then sb is ""
+      if(input$selection == "Yes"){
+        sb = paste0('"', input$sel, '"')
+      }else{
+        sb = format(NULL)
+      }
+
+
+
+      if(input$adjust == "Yes"){
+        if(length(input$conf)==1){
+          confounder = paste0('"', input$conf, '"')
+
+        }else{
+          confounder = list(format(input$conf))
+        }
+
+      }else{
+        confounder = format(NULL)
+      }
+
+      outcome = paste0(
+        'run_1 = varied_runs(', 100,
+        ', dag, exposure = "', input$exp,
+        '" , outcome = "', input$out ,
+        '" , covariates = ', confounder,
+        ' , sb = ', sb,
+        ', n = ', 10000,
+        ')')
+      cat(outcome)
+
+    })
+  })
+
 
 
 }
